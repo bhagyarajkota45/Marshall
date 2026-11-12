@@ -29,8 +29,8 @@
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/readme/screenshot-1.png" alt="Full player with artwork, lyrics and controls"></td>
-    <td width="50%"><img src="docs/readme/screenshot-2.png" alt="Browse view with shelves and playback controls"></td>
+   <td width="50%"><img src="docs/readme/screenshot-4.png" alt="Player view with Cruel Summer lyrics"></td>
+<td width="50%"><img src="docs/readme/screenshot-5.png" alt="Browse view with Cinnamon Girl lyrics"></td>>
   </tr>
   <tr>
     <td align="center"><b>Player</b> — artwork, lyrics, queue and playback in one view</td>
