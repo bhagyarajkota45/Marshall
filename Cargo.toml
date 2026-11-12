@@ -3,7 +3,7 @@ name = "marshall"
 version = "2.0.5"
 edition = "2024"
 license = "GPL-3.0-only"
-repository = "repository = "https://github.com/bhagyarajkota45/Marshall""
+repository = "https://github.com/bhagyarajkota45/Marshall"
 description = "Native Marshall music client"
 
 [dependencies]
