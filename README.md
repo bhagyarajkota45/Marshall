@@ -114,6 +114,3 @@ Marshall is licensed under [GPL-3.0](LICENSE).
 - [rodio](https://github.com/RustAudio/rodio) and Symphonia for audio playback and decoding.
 - Lyrics, metadata, playback, and integrations depend on the upstream libraries and third-party services used by this project.
 
-## Original Project Attribution
-
-This project is based on and customized from [BitChord-PC-Continued](https://github.com/jackychan4891/BitChord-PC-Continued). Original project attribution and GPL-3.0 licensing are retained.
