@@ -20,7 +20,7 @@
 </div>
 
 <p align="center">
-  <img src="docs/readme/screenshot-1.png" alt="Marshall player with artwork, lyrics and controls" width="100%">
+  <img src="docs/readme/screenshot-6.png" alt="Marshall player with artwork, lyrics and controls" width="100%">
 </p>
 
 > Marshall is an independent, unofficial client. It is not affiliated with, endorsed by, or connected to YouTube, Google, or Apple.
