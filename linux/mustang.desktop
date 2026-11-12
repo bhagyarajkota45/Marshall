@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Marshall
+GenericName=Music Player
+Comment=Native Marshall music client
+Exec=mustang
+Icon=mustang
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;player;
+StartupWMClass=mustang

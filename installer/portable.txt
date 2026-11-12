@@ -1,0 +1,4 @@
+This is the portable Marshall build. While this file sits next to marshall.exe, the app
+keeps its settings and caches in the "data" folder here.
+
+Delete this file to use the normal location (%APPDATA%\ytm-rs) instead.

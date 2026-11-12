@@ -1,0 +1,3 @@
+This is the portable Marshall build. While this file is inside Marshall.app
+(Contents/Resources), the app keeps its settings and caches in the "data" folder beside
+Marshall.app. Sign-ins are kept in your login Keychain.
