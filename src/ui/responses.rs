@@ -475,10 +475,22 @@ impl App {
             }
             Resp::AppleCover { key, motion } => {
                 self.apple_waiting.remove(&key);
-                match motion.and_then(|m| m.square) {
+                match motion.and_then(|motion| motion.square) {
                     Some(url) => {
                         self.apple_missed.remove(&key);
                         self.apple_covers.insert(key, Some(url));
+                    }
+                    None => {
+                        self.apple_missed.insert(key, std::time::Instant::now());
+                    }
+                }
+            }
+            Resp::CanvasCover { key, url } => {
+                self.apple_waiting.remove(&key);
+                match url {
+                    Some(url) => {
+                        self.apple_missed.remove(&key);
+                        self.canvas_covers.insert(key, Some(url));
                     }
                     None => {
                         self.apple_missed.insert(key, std::time::Instant::now());

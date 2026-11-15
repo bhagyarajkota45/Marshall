@@ -99,6 +99,13 @@ pub enum Req {
         artist: String,
         title: Option<String>,
     },
+    /// Track-specific Canvas art from the enabled providers.
+    CanvasCover {
+        key: String,
+        title: String,
+        artist: String,
+        album: Option<String>,
+    },
     /// Find and cache a high-resolution sleeve for a local file; `key` groups an album.
     LocalArtwork {
         key: String,
@@ -220,6 +227,7 @@ impl Req {
             Req::Art { .. } => "Art",
             Req::AppleArtist { .. } => "Apple artist",
             Req::AppleCover { .. } => "Apple artwork",
+            Req::CanvasCover { .. } => "Canvas artwork",
             Req::LocalArtwork { .. } => "Local artwork",
             Req::ArtistSignature { .. } => "Artist signature",
             Req::Radio { .. } => "Loading radio",
@@ -253,6 +261,7 @@ impl Req {
                 | Req::Art { .. }
                 | Req::AppleArtist { .. }
                 | Req::AppleCover { .. }
+                | Req::CanvasCover { .. }
                 | Req::LocalArtwork { .. }
                 | Req::ArtistSignature { .. }
                 | Req::Prefetch { .. }
@@ -437,6 +446,11 @@ pub enum Resp {
     AppleCover {
         key: String,
         motion: Option<crate::apple::Motion>,
+    },
+    /// Track-specific Canvas art from the enabled providers.
+    CanvasCover {
+        key: String,
+        url: Option<String>,
     },
     /// A cached static sleeve matched for local tracks, or `None` when no safe match exists.
     LocalArtwork {
@@ -1095,15 +1109,32 @@ impl Backend {
                     title,
                 } => {
                     let motion = match title.as_deref() {
-                        Some(t) => {
-                            crate::apple::song_motion(&self.http(), t, &artist, Some(&album)).await
+                        Some(title) => {
+                            crate::apple::song_motion(&self.http(), title, &artist, Some(&album))
+                                .await
                         }
                         None => crate::apple::album_motion(&self.http(), &album, &artist).await,
                     };
-                    if motion.is_none() {
-                        log::debug!("apple: no motion sleeve for '{album}' by '{artist}'");
-                    }
                     Resp::AppleCover { key, motion }
+                }
+                Req::CanvasCover {
+                    key,
+                    title,
+                    artist,
+                    album,
+                } => {
+                    let url = crate::canvas::motion_for_track(
+                        &self.http(),
+                        &title,
+                        &artist,
+                        album.as_deref(),
+                        self.data_dir(),
+                    )
+                    .await;
+                    if url.is_none() {
+                        log::debug!("Canvas: no motion cover for '{title}' by '{artist}'");
+                    }
+                    Resp::CanvasCover { key, url }
                 }
                 Req::LocalArtwork {
                     key,

@@ -71,6 +71,11 @@ impl Drop for Motion {
     }
 }
 
+enum MotionSource {
+    File(PathBuf),
+    HlsUrl(String),
+}
+
 static STREAMS: LazyLock<Mutex<HashMap<String, Weak<Motion>>>> = LazyLock::new(Default::default);
 
 /// Start (or reuse) the clip at `master`, decoded no wider than `max_width`.
@@ -94,15 +99,19 @@ pub fn play(ctx: &egui::Context, master: &str, max_width: u32) -> Arc<Motion> {
 }
 
 fn run(motion: Arc<Motion>, ctx: egui::Context, master: String, max_width: u32) {
-    let Some(path) = fetch(&master, max_width) else {
-        log::info!("apple: no motion clip downloaded");
+    let Some(source) = fetch(&master, max_width) else {
+        log::warn!("motion: Canvas clip could not be opened");
         return;
     };
-    decode(&motion, &path, &ctx);
+    let source = match source {
+        MotionSource::File(path) => path.to_string_lossy().into_owned(),
+        MotionSource::HlsUrl(url) => url,
+    };
+    decode(&motion, &source, &ctx);
 }
 
 /// Pick a variant and save the clip to the cache; a saved copy is reused.
-fn fetch(master: &str, max_width: u32) -> Option<PathBuf> {
+fn fetch(master: &str, max_width: u32) -> Option<MotionSource> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -110,14 +119,36 @@ fn fetch(master: &str, max_width: u32) -> Option<PathBuf> {
     rt.block_on(async {
         use sha1::{Digest, Sha1};
         let http = crate::proxy::http();
-        let media = crate::apple::variant(&http, master, max_width).await?;
-        let file = crate::apple::media_file(&http, &media).await?;
+        let url_path = master
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(master)
+            .to_ascii_lowercase();
+        let is_mp4 = url_path.ends_with(".mp4");
+        let is_hls = url_path.ends_with(".m3u8");
+        let file = if is_mp4 {
+            Some(master.to_owned())
+        } else {
+            let media = crate::apple::variant(&http, master, max_width).await;
+            match media {
+                Some(media) => crate::apple::media_file(&http, &media).await,
+                None if is_hls => crate::apple::media_file(&http, master).await,
+                None => None,
+            }
+        };
+        let Some(file) = file else {
+            if is_hls {
+                log::debug!("motion: handing HLS playlist to Media Foundation");
+                return Some(MotionSource::HlsUrl(master.to_owned()));
+            }
+            return None;
+        };
         let dir = crate::data_dir().join("motion");
         std::fs::create_dir_all(&dir).ok()?;
         let name = format!("{:x}", Sha1::digest(file.as_bytes()));
         let path = dir.join(format!("{}.mp4", &name[..32]));
         if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > 1024 {
-            return Some(path);
+            return Some(MotionSource::File(path));
         }
         let bytes = http
             .get(&file)
@@ -133,16 +164,13 @@ fn fetch(master: &str, max_width: u32) -> Option<PathBuf> {
         let tmp = path.with_extension("part");
         std::fs::write(&tmp, &bytes).ok()?;
         std::fs::rename(&tmp, &path).ok()?;
-        log::info!(
-            "apple: motion clip {:.0} KB cached",
-            bytes.len() as f64 / 1024.0
-        );
-        Some(path)
+        log::info!("motion clip {:.0} KB cached", bytes.len() as f64 / 1024.0);
+        Some(MotionSource::File(path))
     })
 }
 
 #[cfg(windows)]
-fn decode(motion: &Arc<Motion>, path: &std::path::Path, ctx: &egui::Context) {
+fn decode(motion: &Arc<Motion>, source: &str, ctx: &egui::Context) {
     use windows::Win32::Media::MediaFoundation::{
         MF_VERSION, MFSTARTUP_FULL, MFShutdown, MFStartup,
     };
@@ -155,7 +183,7 @@ fn decode(motion: &Arc<Motion>, path: &std::path::Path, ctx: &egui::Context) {
             CoUninitialize();
             return;
         }
-        let mut wide: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
+        let mut wide: Vec<u16> = source.encode_utf16().collect();
         wide.push(0);
         let url = windows::core::PCWSTR(wide.as_ptr());
         // Loop the cover for as long as it is visible; the view stops it when it leaves.
@@ -204,7 +232,11 @@ unsafe fn play_once(motion: &Motion, ctx: &egui::Context, url: windows::core::PC
                 if motion.stop.load(Ordering::Relaxed) {
                     return Ok(false);
                 }
-                if motion.paused.load(Ordering::Relaxed) {
+                // Paint one frame even if playback is already paused when the
+                // decoder starts. Later frames follow the transport as usual.
+                if motion.paused.load(Ordering::Relaxed)
+                    && motion.version.load(Ordering::Acquire) > 0
+                {
                     let paused_at = Instant::now();
                     while motion.paused.load(Ordering::Relaxed)
                         && !motion.stop.load(Ordering::Relaxed)
@@ -264,7 +296,7 @@ unsafe fn play_once(motion: &Motion, ctx: &egui::Context, url: windows::core::PC
                 }
                 buffer.Unlock()?;
                 if motion.version.load(Ordering::Acquire) == 0 {
-                    log::info!("apple: motion playing at {w}x{h}");
+                    log::info!("motion: first frame decoded at {w}x{h}");
                 }
                 motion.publish(ctx, w, h, rgba);
             }
@@ -273,14 +305,14 @@ unsafe fn play_once(motion: &Motion, ctx: &egui::Context, url: windows::core::PC
     match played {
         Ok(ok) => ok,
         Err(e) => {
-            log::warn!("apple: motion decode failed: {e}");
+            log::warn!("motion: clip decode failed: {e}");
             false
         }
     }
 }
 
 #[cfg(not(windows))]
-fn decode(_motion: &Arc<Motion>, _path: &std::path::Path, _ctx: &egui::Context) {}
+fn decode(_motion: &Arc<Motion>, _source: &str, _ctx: &egui::Context) {}
 
 /// The frame buffer's real row length in bytes, and whether its rows run bottom-up. Media
 /// Foundation's video processor pads the frame (a 1080 px clip comes back 1088 px wide, rows
@@ -328,7 +360,8 @@ mod tests {
         let ctx = egui::Context::default();
         let motion = Arc::new(Motion::new("test"));
         let this = motion.clone();
-        std::thread::spawn(move || decode(&this, &path, &ctx));
+        let source = path.to_string_lossy().into_owned();
+        std::thread::spawn(move || decode(&this, &source, &ctx));
         let start = Instant::now();
         while motion.latest().is_none() && start.elapsed() < Duration::from_secs(15) {
             std::thread::sleep(Duration::from_millis(50));

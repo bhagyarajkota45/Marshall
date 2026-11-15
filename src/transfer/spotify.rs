@@ -35,11 +35,12 @@ const PAGE: usize = 343;
 const LIBRARY_PAGE: usize = 50;
 const CDN: &str = "https://open.spotifycdn.com/cdn/build/web-player/";
 /// The persisted queries this reads, found in the web player's bundle.
-const OPERATIONS: [&str; 4] = [
+const OPERATIONS: [&str; 5] = [
     "fetchPlaylist",
     "fetchLibraryTracks",
     "libraryV3",
     "profileAttributes",
+    "canvas",
 ];
 /// Where the query hashes are cached, so a new bundle (several MB) is read once per web-player release.
 const HASH_CACHE: &str = "spotify_queries.json";
@@ -216,6 +217,114 @@ impl Client {
             client_version,
             hashes,
         })
+    }
+
+    /// Find a track's playable Canvas URL when Spotify is signed in.
+    pub async fn canvas_url_for(
+        &self,
+        title: &str,
+        artist: &str,
+        album: Option<&str>,
+    ) -> Result<Option<String>> {
+        let query = [Some(title), Some(artist), album]
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let response: Value = self
+            .http
+            .get("https://api.spotify.com/v1/search")
+            .query(&[("q", query.as_str()), ("type", "track"), ("limit", "10")])
+            .bearer_auth(&self.access_token)
+            .header("Client-Token", &self.client_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let mut track_uri = None;
+        if let Some(items) = response.pointer("/tracks/items").and_then(Value::as_array) {
+            for track in items {
+                let Some(got_title) = track.get("name").and_then(Value::as_str) else {
+                    continue;
+                };
+                let artists = track
+                    .get("artists")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item.get("name").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let got_album = track.pointer("/album/name").and_then(Value::as_str);
+                if crate::canvas::matches_song(got_title, &artists, got_album, title, artist, album)
+                {
+                    track_uri = track.get("uri").and_then(Value::as_str).map(str::to_owned);
+                    if track_uri.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        let Some(track_uri) = track_uri else {
+            return Ok(None);
+        };
+        if let Ok(Some(url)) = self.canvas_pathfinder(&track_uri).await {
+            return Ok(Some(url));
+        }
+        self.canvas_canvaz(&track_uri).await
+    }
+
+    async fn canvas_pathfinder(&self, track_uri: &str) -> Result<Option<String>> {
+        let hash = self.hash("canvas")?;
+        let body = json!({
+            "operationName": "canvas",
+            "variables": { "trackUri": track_uri },
+            "extensions": {
+                "persistedQuery": { "version": 1, "sha256Hash": hash }
+            }
+        });
+        let response = self
+            .http
+            .post("https://api-partner.spotify.com/pathfinder/v2/query")
+            .bearer_auth(&self.access_token)
+            .header("Client-Token", &self.client_token)
+            .header("App-platform", "WebPlayer")
+            .header("Accept", "application/json")
+            .header("Accept-Language", "en")
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let body: Value = response.json().await?;
+        Ok(body
+            .pointer("/data/trackUnion/canvas/url")
+            .and_then(Value::as_str)
+            .filter(|url| url.starts_with("https://") && is_mp4_url(url))
+            .map(str::to_owned))
+    }
+
+    async fn canvas_canvaz(&self, track_uri: &str) -> Result<Option<String>> {
+        let response = self
+            .http
+            .post("https://spclient.wg.spotify.com/canvaz-cache/v0/canvases")
+            .header("Content-Type", "application/protobuf")
+            .header("Accept", "application/protobuf")
+            .header("Accept-Language", "en")
+            .header("User-Agent", "Spotify/9.0.34.593 iOS/18.4 (iPhone15,3)")
+            .bearer_auth(&self.access_token)
+            .header("Client-Token", &self.client_token)
+            .body(encode_canvas_request(track_uri))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let bytes = response.bytes().await?;
+        Ok(decode_canvas_response(&bytes, track_uri).or_else(|| canvas_url_from_bytes(&bytes)))
     }
 
     fn hash(&self, operation: &str) -> Result<&str> {
@@ -638,6 +747,150 @@ fn split_artists(s: &str) -> Vec<String> {
         .collect()
 }
 
+fn is_mp4_url(url: &str) -> bool {
+    url.split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase()
+        .ends_with(".mp4")
+}
+
+fn write_varint(mut value: u64, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+fn write_bytes_field(field: u64, value: &[u8], out: &mut Vec<u8>) {
+    write_varint((field << 3) | 2, out);
+    write_varint(value.len() as u64, out);
+    out.extend_from_slice(value);
+}
+
+fn encode_canvas_request(track_uri: &str) -> Vec<u8> {
+    let mut track = Vec::new();
+    write_bytes_field(1, track_uri.as_bytes(), &mut track);
+    let mut request = Vec::new();
+    write_bytes_field(1, &track, &mut request);
+    request
+}
+
+fn read_varint(input: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for shift in (0..70).step_by(7) {
+        let byte = *input.get(*pos)?;
+        *pos += 1;
+        if shift == 63 && byte > 1 {
+            return None;
+        }
+        value |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn read_bytes_field<'a>(input: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+    let len = usize::try_from(read_varint(input, pos)?).ok()?;
+    let end = (*pos).checked_add(len)?;
+    let value = input.get(*pos..end)?;
+    *pos = end;
+    Some(value)
+}
+
+fn skip_field(input: &[u8], pos: &mut usize, wire: u64) -> bool {
+    match wire {
+        0 => read_varint(input, pos).is_some(),
+        1 => {
+            let Some(end) = (*pos).checked_add(8) else {
+                return false;
+            };
+            if end > input.len() {
+                return false;
+            }
+            *pos = end;
+            true
+        }
+        2 => read_bytes_field(input, pos).is_some(),
+        5 => {
+            let Some(end) = (*pos).checked_add(4) else {
+                return false;
+            };
+            if end > input.len() {
+                return false;
+            }
+            *pos = end;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn decode_canvas_message(input: &[u8]) -> Option<(String, Option<String>)> {
+    let (mut pos, mut url, mut track_uri) = (0, None, None);
+    while pos < input.len() {
+        let tag = read_varint(input, &mut pos)?;
+        if tag == 0 {
+            break;
+        }
+        let field = tag >> 3;
+        let wire = tag & 7;
+        if wire == 2 && (field == 2 || field == 5) {
+            let value = String::from_utf8_lossy(read_bytes_field(input, &mut pos)?).into_owned();
+            if field == 2 {
+                url = Some(value);
+            } else {
+                track_uri = Some(value);
+            }
+        } else if !skip_field(input, &mut pos, wire) {
+            return None;
+        }
+    }
+    url.map(|url| (url, track_uri))
+}
+
+fn decode_canvas_response(input: &[u8], wanted_uri: &str) -> Option<String> {
+    let (mut pos, mut hits) = (0, Vec::new());
+    while pos < input.len() {
+        let tag = read_varint(input, &mut pos)?;
+        if tag == 0 {
+            break;
+        }
+        let field = tag >> 3;
+        let wire = tag & 7;
+        if field == 1 && wire == 2 {
+            if let Some(hit) = decode_canvas_message(read_bytes_field(input, &mut pos)?) {
+                hits.push(hit);
+            }
+        } else if !skip_field(input, &mut pos, wire) {
+            return None;
+        }
+    }
+    hits.iter()
+        .find(|(_, uri)| uri.as_deref() == Some(wanted_uri))
+        .or_else(|| hits.first())
+        .map(|(url, _)| url.clone())
+        .filter(|url| url.starts_with("https://") && url.contains(".cnvs.mp4"))
+}
+
+fn canvas_url_from_bytes(input: &[u8]) -> Option<String> {
+    let bytes = String::from_utf8_lossy(input);
+    for (_, rest) in bytes.match_indices("https://") {
+        let candidate = rest
+            .split(|ch: char| {
+                ch.is_whitespace() || ch.is_control() || ch == '"' || ch == 39 as char
+            })
+            .next()?;
+        if candidate.contains(".cnvs.mp4") {
+            return Some(candidate.to_owned());
+        }
+    }
+    None
+}
+
 async fn access_token(
     http: &reqwest::Client,
     sp_dc: Option<&str>,
@@ -781,6 +1034,7 @@ async fn query_hashes(http: &reqwest::Client, bundle: &str, data_dir: &Path) -> 
         .and_then(|b| serde_json::from_slice::<Hashes>(&b).ok())
         && h.bundle == bundle
         && h.ops.contains_key("fetchPlaylist")
+        && h.ops.contains_key("canvas")
     {
         return Ok(h);
     }

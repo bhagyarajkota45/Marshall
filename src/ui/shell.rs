@@ -1577,7 +1577,7 @@ fn paint_mark(ui: &Ui, r: Rect) {
 
 /// The Marshall logo, fitted inside `r`, tinted `tint`.
 fn mark(ui: &Ui, r: Rect, tint: Color32) {
-    const MARK: &[u8] = include_bytes!("../../assets/icon/marshall-logo-2160.png");
+    const MARK: &[u8] = include_bytes!("../../assets/icon/marshall-main-logo.png");
     const W: f32 = 256.0;
     const H: f32 = 256.0;
     let key = egui::Id::unique("marshall-mark");

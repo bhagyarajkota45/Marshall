@@ -494,26 +494,23 @@ fn cover_column(
     }
     {
         widgets::paint_cover_px(ui, art, &track.thumbs, radius, 1.0, px);
-        // Apple's motion sleeve, over the still until its first frame arrives.
-        if let Some(album) = track
+        // The matched Canvas clip covers the still only after its first frame arrives.
+        let album = track
             .album
             .as_ref()
+            .map(|a| a.name.as_str())
+            .filter(|a| !a.is_empty());
+        let artist = track
+            .artists
+            .first()
             .map(|a| a.name.clone())
-            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| track.artist_line());
+        let motion_enabled = app.animated_art;
+        let playing = app.playing();
+        app.canvas_cover(motion_enabled, &track.id, &track.title, &artist, album);
+        if let Some(s) = app.canvas_sprite(motion_enabled, playing, ui.ctx(), &track.id, album, px)
         {
-            let artist = track
-                .artists
-                .first()
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| track.artist_line());
-            let motion_enabled = app.animated_art;
-            let playing = app.playing();
-            app.apple_cover(motion_enabled, &album, &artist, Some(&track.title));
-            if let Some(s) =
-                app.apple_sprite(motion_enabled, playing, ui.ctx(), &album, &artist, px)
-            {
-                widgets::paint_motion(ui, art, radius, &s);
-            }
+            widgets::paint_motion(ui, art, radius, &s);
         }
     }
     if cs.brightness < 0.99 {

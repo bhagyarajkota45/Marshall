@@ -10,6 +10,7 @@ mod artist_signature;
 mod audio;
 mod backend;
 mod bidi;
+mod canvas;
 mod dash;
 mod deeplink;
 mod discord;

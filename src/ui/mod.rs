@@ -447,12 +447,15 @@ pub struct App {
     /// Apple's page for each artist visited (their display name and hero clips).
     apple_artists: std::collections::HashMap<String, Option<crate::apple::Artwork>>,
     /// Motion sleeve master playlist per release key (`None`: Apple has none).
+    /// Apple motion sleeves for album and mini-player artwork.
     apple_covers: std::collections::HashMap<String, Option<String>>,
+    /// Canvas URLs for track-specific Now Playing artwork.
+    canvas_covers: std::collections::HashMap<String, Option<String>>,
     /// Releases Apple had nothing for when last asked, and when: asked again after a
     /// while, since a lookup can fail on a network hiccup rather than for good.
     apple_missed: std::collections::HashMap<String, std::time::Instant>,
     /// Decoders for the motion sleeves on screen.
-    apple_motion: std::collections::HashMap<String, MotionView>,
+    canvas_motion: std::collections::HashMap<String, MotionView>,
     /// Apple lookups already in flight.
     apple_waiting: std::collections::HashSet<String>,
     /// Settings › Artist pages: the listener's own signature service, or empty.
@@ -864,8 +867,9 @@ impl App {
             art_key: None,
             apple_artists: Default::default(),
             apple_covers: Default::default(),
+            canvas_covers: Default::default(),
             apple_missed: Default::default(),
-            apple_motion: Default::default(),
+            canvas_motion: Default::default(),
             apple_waiting: Default::default(),
             signature_api: get("signature_api").unwrap_or_default(),
             signature_tex: Default::default(),
@@ -901,7 +905,7 @@ impl App {
             ),
             anim_bg: get("anim_bg").is_none_or(|v| v == "1"),
             reactive_bg: get("reactive_bg").is_none_or(|v| v == "1"),
-            animated_art: false,
+            animated_art: true,
             haze_mode: get("haze_mode")
                 .and_then(|v| v.parse::<u8>().ok())
                 .unwrap_or(0)
@@ -1180,23 +1184,19 @@ impl App {
         }
     }
 
-    /// Ask Apple, once, for the release's motion sleeve.
+    /// Ask Apple once for an album or track motion sleeve used on other surfaces.
     fn apple_cover(&mut self, enabled: bool, album: &str, artist: &str, title: Option<&str>) {
         if !enabled || album.is_empty() || artist.is_empty() {
             return;
         }
         let key = format!("{album}\u{1}{artist}");
-        if self.apple_covers.contains_key(&key) {
-            return;
-        }
-        if self
-            .apple_missed
-            .get(&key)
-            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(300))
+        if self.apple_covers.contains_key(&key)
+            || self
+                .apple_missed
+                .get(&key)
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(300))
+            || !self.apple_waiting.insert(key.clone())
         {
-            return;
-        }
-        if !self.apple_waiting.insert(key.clone()) {
             return;
         }
         self.backend.request(Req::AppleCover {
@@ -1207,8 +1207,7 @@ impl App {
         });
     }
 
-    /// The newest frame of the release's motion sleeve, started the first time it's seen.
-    /// `None` until Apple has answered (or if it has no clip for the release).
+    /// Latest frame of the Apple sleeve used by album and mini-player artwork.
     fn apple_sprite(
         &mut self,
         enabled: bool,
@@ -1224,6 +1223,59 @@ impl App {
         let key = format!("{album}\u{1}{artist}");
         self.stop_motion_views_except(&key);
         let url = self.apple_covers.get(&key)?.clone()?;
+        self.motion_sprite(ctx, key, &url, max_width, playing)
+    }
+
+    /// Ask the Canvas sources once for the playing track's matched clip.
+    fn canvas_cover(
+        &mut self,
+        enabled: bool,
+        track_id: &str,
+        title: &str,
+        artist: &str,
+        album: Option<&str>,
+    ) {
+        if !enabled || title.trim().is_empty() || artist.trim().is_empty() {
+            return;
+        }
+        let key = format!("canvas:{track_id}|{}", album.unwrap_or_default());
+        if self.canvas_covers.contains_key(&key) {
+            return;
+        }
+        if self
+            .apple_missed
+            .get(&key)
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(300))
+        {
+            return;
+        }
+        if !self.apple_waiting.insert(key.clone()) {
+            return;
+        }
+        self.backend.request(Req::CanvasCover {
+            key,
+            title: title.to_owned(),
+            artist: artist.to_owned(),
+            album: album.map(str::to_owned),
+        });
+    }
+
+    /// The newest frame of the current track's matched Canvas clip, when available.
+    fn canvas_sprite(
+        &mut self,
+        enabled: bool,
+        playing: bool,
+        ctx: &egui::Context,
+        track_id: &str,
+        album: Option<&str>,
+        max_width: u32,
+    ) -> Option<widgets::MotionSprite> {
+        if !enabled {
+            return None;
+        }
+        let key = format!("canvas:{track_id}|{}", album.unwrap_or_default());
+        self.stop_motion_views_except(&key);
+        let url = self.canvas_covers.get(&key)?.clone()?;
         self.motion_sprite(ctx, key, &url, max_width, playing)
     }
 
@@ -1297,22 +1349,22 @@ impl App {
         // frame: a bigger view takes over only when it needs a wider decode.
         self.stop_motion_views_except(&key);
         let stale = self
-            .apple_motion
+            .canvas_motion
             .get(&key)
             .map_or(true, |v| v.width < max_width);
         if stale {
-            if let Some(old) = self.apple_motion.remove(&key) {
+            if let Some(old) = self.canvas_motion.remove(&key) {
                 old.motion.stop();
             }
-            if self.apple_motion.len() >= 8 {
+            if self.canvas_motion.len() >= 8 {
                 self.stop_motion_views();
             }
-            self.apple_motion.insert(
+            self.canvas_motion.insert(
                 key.clone(),
                 MotionView::new(crate::motion::play(ctx, url, max_width), max_width),
             );
         }
-        let view = self.apple_motion.get_mut(&key)?;
+        let view = self.canvas_motion.get_mut(&key)?;
         view.motion.set_playing(playing);
         let tex = view.texture(ctx)?;
         Some(widgets::MotionSprite {
@@ -1324,14 +1376,14 @@ impl App {
     /// Stop active decoders when their view goes away so hidden covers do not keep
     /// downloading or decoding frames in the background.
     pub(super) fn stop_motion_views(&mut self) {
-        for view in self.apple_motion.values() {
+        for view in self.canvas_motion.values() {
             view.motion.stop();
         }
-        self.apple_motion.clear();
+        self.canvas_motion.clear();
     }
 
     fn stop_motion_views_except(&mut self, key: &str) {
-        self.apple_motion.retain(|existing, view| {
+        self.canvas_motion.retain(|existing, view| {
             let keep = existing == key;
             if !keep {
                 view.motion.stop();
@@ -1902,7 +1954,7 @@ impl eframe::App for App {
         }
         storage.set_string("anim_bg", b(self.anim_bg));
         storage.set_string("reactive_bg", b(self.reactive_bg));
-        storage.set_string("animated_art", "0".to_owned());
+        storage.set_string("animated_art", "1".to_owned());
         storage.set_string("eq_enabled", b(self.eq_enabled));
         storage.set_string("eq_sfx_enabled", b(self.eq_sfx_enabled));
         storage.set_string("eq_panel_tab", self.eq_panel_tab.to_string());
