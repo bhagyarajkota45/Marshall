@@ -1,0 +1,45 @@
+﻿name: Marshall Windows Build for SignPath
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Marshall for Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Marshall
+        run: cargo build --release --locked
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          $exe = "target/release/marshall.exe"
+          if (!(Test-Path $exe)) {
+            throw "Marshall executable was not generated."
+          }
+          Get-Item $exe | Format-List Name, Length
+
+      - name: Upload unsigned executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: marshall-windows-unsigned
+          path: target/release/marshall.exe
+          if-no-files-found: error
+          retention-days: 14
