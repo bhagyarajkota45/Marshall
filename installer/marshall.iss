@@ -6,7 +6,7 @@
 ;   iscc /DArm64 installer\marshall.iss  ->  Marshall-setup-<version>-arm64.exe
 
 #define AppName "Marshall"
-#define AppVersion "2.0.5"
+#define AppVersion "2.0.6"
 #define AppExe "marshall.exe"
 #ifdef Arm64
   #define Arch "arm64"
@@ -15,7 +15,7 @@
 #else
   #define Arch "x64compatible"
   #define Suffix ""
-  #define BinDir "..\target\release"
+  #define BinDir "E:\Marshall-Build\release"
 #endif
 
 [Setup]

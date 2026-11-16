@@ -1297,6 +1297,7 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
     // Apple's own page for this artist: their display name and the hero clip. Artists
     // Apple has no clip for (Charli xcx) keep the still banner.
     let apple = app.apple_artists.get(id).and_then(|o| o.clone());
+
     let name = apple.as_ref().map(|x| x.name.clone()).unwrap_or_else(|| {
         app.artist
             .as_ref()
@@ -1319,26 +1320,36 @@ fn artist(app: &mut App, ui: &mut Ui, id: &str, now: f64) {
         }
     }
     // Apple's wordmark wins the hero; failing one, the listener's signature service;
-    // failing that, the name in type. A lettered artist still has their signature
-    // asked for, because it signs the About section below instead of the hero.
-    let signature = app.signature_texture(ui.ctx(), &name);
-    let Some(a) = &app.artist else { return };
-    let acts = &mut app.actions;
-    let top = &a.top;
+    // failing that, the name in type.
+let signature = app.signature_texture(ui.ctx(), &name);
+let hero_video = app.apple_artists
+    .get(id)
+    .and_then(|artwork| artwork.as_ref())
+    .and_then(|artwork| artwork.hero_video.clone());
+
+let artist_video = hero_video.as_deref().and_then(|url| {
+    app.artist_motion_sprite(ui.ctx(), id, url, 1920)
+});
+let Some(a) = &app.artist else { return };
+let acts = &mut app.actions;
+let top = &a.top;
     // Hero banner fading into the page.
     let w = ui.available_width();
     let hero_h = (w * 0.34).clamp(240.0, 380.0);
     let (hero, _) = ui.allocate_exact_size(vec2(w, hero_h), Sense::hover());
-    if let Some(t) = a.banner.iter().max_by_key(|t| t.width) {
+        ui.painter().rect_filled(hero, 14.0, theme::glass(0.07));
+
+
+    if let Some(sprite) = &artist_video {
+        widgets::paint_motion(ui, hero, 14.0, sprite);
+    } else if let Some(t) = a.banner.iter().max_by_key(|t| t.width) {
         let img_ratio = if t.height > 0 {
             t.width as f32 / t.height as f32
         } else {
             16.0 / 9.0
         };
-        // Cover-fit: crop the image's top band to the hero's aspect.
         let vis_h = (img_ratio / (w / hero_h)).min(1.0);
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, vis_h));
-        ui.painter().rect_filled(hero, 14.0, theme::glass(0.07));
         widgets::paint_remote(ui, &t.url, hero, 14.0, uv, Color32::WHITE);
     } else {
         ui.painter()

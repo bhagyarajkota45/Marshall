@@ -866,12 +866,146 @@ fn list_page(items: &[Value]) -> (Vec<Track>, Vec<Option<String>>, Option<String
     (tracks, ids, item_token(items))
 }
 
+
+// ----------------------------------------------------------------------- artists
+
+
 // ----------------------------------------------------------------------- artists
 
 pub async fn artist(api: &Api, id: &str) -> anyhow::Result<ArtistPage> {
     let v = api.call("browse", json!({ "browseId": id }), false).await?;
-    parse_artist(&v, id)
-        .ok_or_else(|| anyhow::anyhow!("YouTube Music returned an empty artist page"))
+
+    let mut page = parse_artist(&v, id)
+        .ok_or_else(|| anyhow::anyhow!("YouTube Music returned an empty artist page"))?;
+
+    let artist_name = page.name.clone();
+
+    let sections = arr(
+        &v["contents"]["singleColumnBrowseResultsRenderer"]["tabs"][0]
+            ["tabRenderer"]["content"]["sectionListRenderer"]["contents"],
+    );
+
+    for section in sections {
+        let carousel = &section["musicCarouselShelfRenderer"];
+        if carousel.is_null() {
+            continue;
+        }
+
+        let header = &carousel["header"]["musicCarouselShelfBasicHeaderRenderer"];
+        let title = text(&header["title"]).unwrap_or_default();
+
+        let kind = if title.starts_with("Single") {
+            "Single"
+        } else if title.starts_with("Album") {
+            "Album"
+        } else {
+            continue;
+        };
+
+        let endpoint = &header["moreContentButton"]["buttonRenderer"]
+            ["navigationEndpoint"]["browseEndpoint"];
+
+        let (Some(browse_id), Some(params)) = (
+            endpoint["browseId"].as_str(),
+            endpoint["params"].as_str(),
+        ) else {
+            continue;
+        };
+
+        let cards = match artist_discography(api, browse_id, params).await {
+            Ok(cards) => cards,
+            Err(e) => {
+                log::warn!("artist discography '{title}' failed: {e}");
+                continue;
+            }
+        };
+
+        for mut card in cards {
+            if !matches!(&card.target, Target::Album(_)) {
+                continue;
+            }
+
+            card.subtitle = [
+                kind,
+                artist_name.as_str(),
+                card.subtitle.as_str(),
+            ]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" • ");
+
+            if card.links.is_empty() {
+                card.links.push(Link {
+                    name: artist_name.clone(),
+                    id: Some(id.to_owned()),
+                });
+            }
+
+            page.albums.push(card);
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    page.albums.retain(|card| match &card.target {
+        Target::Album(album_id) => seen.insert(album_id.clone()),
+        _ => true,
+    });
+
+    Ok(page)
+}
+
+async fn artist_discography(
+    api: &Api,
+    browse_id: &str,
+    params: &str,
+) -> anyhow::Result<Vec<Card>> {
+    let v = api
+        .call(
+            "browse",
+            json!({
+                "browseId": browse_id,
+                "params": params
+            }),
+            false,
+        )
+        .await?;
+
+    let sections = arr(
+        &v["contents"]["singleColumnBrowseResultsRenderer"]["tabs"][0]
+            ["tabRenderer"]["content"]["sectionListRenderer"]["contents"],
+    );
+
+    let mut cards = grid_cards(sections);
+    let mut token = sections.iter().find_map(|s| grid_next(&s["gridRenderer"]));
+
+    for _ in 0..100 {
+        let Some(t) = token.take() else {
+            break;
+        };
+
+        let next_page = match api
+            .call("browse", json!({ "continuation": t }), false)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("artist discography continuation failed: {e}");
+                break;
+            }
+        };
+
+        let (more, next) = grid_continuation(&next_page);
+        if more.is_empty() {
+            break;
+        }
+
+        cards.extend(more);
+        token = next;
+    }
+
+    Ok(cards)
 }
 
 fn parse_artist(v: &Value, id: &str) -> Option<ArtistPage> {

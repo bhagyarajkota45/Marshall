@@ -12,6 +12,9 @@ use serde_json::Value;
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 const TIDAL_SEARCH: &str = "https://api.tidal.com/v1/search";
+const NOPXX_SEARCH: &str = "https://apple-music-artwork.nopxx.site/api/search";
+const M8TEC_SEARCH: &str = "https://artwork.m8tec.top/api/v1/artwork/search";
+const BOIDU_SEARCH: &str = "https://artwork.boidu.dev/";
 const TIDAL_EMBED_TOKEN: &str = "vNVdglQOjFJJGG2U";
 const COMMUNITY_MANIFEST: &str = "https://vivimusicanvas.mkmdevilmi.workers.dev/canvas.json";
 const COMMUNITY_TTL: Duration = Duration::from_secs(30 * 60);
@@ -47,36 +50,225 @@ pub async fn motion_for_track(
         return None;
     }
 
+    // 1. NopXx
+    if let Some(url) = nopxx_track(http, title, artist, album).await {
+        log::debug!("Canvas: NopXx found animation for '{title}' by '{artist}'");
+        return Some(url);
+    }
+
+    // 2. m8tec
+    if let Some(url) = m8tec_track(http, title, artist, album).await {
+        log::debug!("Canvas: m8tec found animation for '{title}' by '{artist}'");
+        return Some(url);
+    }
+
+    // 3. boidu
+    if let Some(url) = boidu_track(http, title, artist, album).await {
+        log::debug!("Canvas: boidu found animation for '{title}' by '{artist}'");
+        return Some(url);
+    }
+
+    // 4. Apple Music
     if let Some(url) = crate::apple::song_motion(http, title, artist, album)
         .await
         .and_then(|motion| motion.square)
     {
-        log::debug!("Canvas: Apple motion found for '{title}' by '{artist}'");
+        log::debug!("Canvas: Apple Music found animation for '{title}' by '{artist}'");
         return Some(url);
     }
-    log::debug!("Canvas: Apple found no clip for '{title}' by '{artist}'");
+
+    // 5. Tidal
     if let Some(url) = tidal_track(http, title, artist, album).await {
-        log::debug!("Canvas: Tidal cover found for '{title}' by '{artist}'");
+        log::debug!("Canvas: Tidal found animation for '{title}' by '{artist}'");
         return Some(url);
     }
-    log::debug!("Canvas: Tidal found no clip for '{title}' by '{artist}'");
+
+    // 6. Community
     if let Some(url) = community_track(http, title, artist, album).await {
-        log::debug!("Canvas: community cover found for '{title}' by '{artist}'");
+        log::debug!("Canvas: Community found animation for '{title}' by '{artist}'");
         return Some(url);
     }
-    log::debug!("Canvas: community index found no clip for '{title}' by '{artist}'");
+
+    // 7. Spotify Canvas
     if let Some(cookie) =
         crate::vault::get("spotify sp_dc", data_dir).and_then(|bytes| String::from_utf8(bytes).ok())
     {
-        if let Ok(client) = crate::transfer::spotify::Client::connect(Some(&cookie), data_dir).await
-        {
+        if let Ok(client) = crate::transfer::spotify::Client::connect(Some(&cookie), data_dir).await {
             if let Ok(Some(url)) = client.canvas_url_for(title, artist, album).await {
-                log::debug!("Canvas: Spotify clip found for '{title}' by '{artist}'");
+                log::debug!("Canvas: Spotify Canvas found animation for '{title}' by '{artist}'");
                 return Some(url);
             }
         }
     }
-    log::debug!("Canvas: no provider found a clip for '{title}' by '{artist}'");
+
+    log::debug!("Canvas: no provider found animation for '{title}' by '{artist}'");
+    None
+}
+
+async fn nopxx_track(
+    http: &Client,
+    title: &str,
+    artist: &str,
+    album: Option<&str>,
+) -> Option<String> {
+    let query = match album.filter(|a| !a.trim().is_empty()) {
+        Some(album) => format!("{title} {artist} {album}"),
+        None => format!("{title} {artist}"),
+    };
+
+    let root: Value = http
+        .get(NOPXX_SEARCH)
+        .query(&[("term", query.as_str())])
+        .header("User-Agent", CANVAS_UA)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    for item in root.get("results")?.as_array()? {
+        let Some(got_title) = item.get("track").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(got_artist) = item.get("artist").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(animation) = item
+            .get("animation")
+            .filter(|value| !value.is_null())
+        else {
+            continue;
+        };
+
+        let got_album = item.get("album").and_then(Value::as_str);
+
+        if !matches_song(
+            got_title,
+            &[got_artist.to_owned()],
+            got_album,
+            title,
+            artist,
+            album,
+        ) {
+            continue;
+        }
+
+        let candidates = [
+            animation.get("best").and_then(Value::as_str),
+            animation.get("square").and_then(|v| v.get("1080p")).and_then(Value::as_str),
+            animation.get("square").and_then(|v| v.get("960p")).and_then(Value::as_str),
+            animation.get("square").and_then(|v| v.get("768p")).and_then(Value::as_str),
+        ];
+
+        for url in candidates.into_iter().flatten() {
+            let path = url.split(['?', '#']).next().unwrap_or("");
+            if url.starts_with("https://")
+                && (path.ends_with(".mp4") || path.ends_with(".m3u8"))
+            {
+                return Some(url.to_owned());
+            }
+        }
+    }
+
+    None
+}
+async fn m8tec_track(
+    http: &Client,
+    title: &str,
+    artist: &str,
+    album: Option<&str>,
+) -> Option<String> {
+    let album = album.filter(|a| !a.trim().is_empty())?;
+
+    let root: Value = http
+        .get(M8TEC_SEARCH)
+        .query(&[("artist", artist), ("album", album)])
+        .header("User-Agent", CANVAS_UA)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    let got_artist = root.get("artist").and_then(Value::as_str)?;
+
+    if !matches_song(
+        title,
+        &[got_artist.to_owned()],
+        None,
+        title,
+        artist,
+        None,
+    ) {
+        return None;
+    }
+
+    for key in ["url", "url_tall"] {
+        if let Some(url) = root.get(key).and_then(Value::as_str) {
+            let path = url.split(['?', '#']).next().unwrap_or("");
+            if url.starts_with("https://") && path.ends_with(".m3u8") {
+                return Some(url.to_owned());
+            }
+        }
+    }
+
+    None
+}
+async fn boidu_track(
+    http: &Client,
+    title: &str,
+    artist: &str,
+    album: Option<&str>,
+) -> Option<String> {
+    let album = album.unwrap_or("");
+
+    let root: Value = http
+        .get(BOIDU_SEARCH)
+        .query(&[("s", title), ("a", artist), ("al", album)])
+        .header("User-Agent", CANVAS_UA)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    let got_title = root.get("name").and_then(Value::as_str)?;
+    let got_artist = root.get("artist").and_then(Value::as_str)?;
+
+    if !matches_song(
+        got_title,
+        &[got_artist.to_owned()],
+        None,
+        title,
+        artist,
+        None,
+    ) {
+        return None;
+    }
+
+    for key in ["videoUrl", "animated", "videoUrlVertical", "animatedVertical"] {
+        if let Some(url) = root.get(key).and_then(Value::as_str) {
+            let path = url.split(['?', '#']).next().unwrap_or("");
+            if url.starts_with("https://")
+                && (path.ends_with(".mp4") || path.ends_with(".m3u8"))
+            {
+                return Some(url.to_owned());
+            }
+        }
+    }
+
     None
 }
 

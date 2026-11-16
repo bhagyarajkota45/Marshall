@@ -456,6 +456,8 @@ pub struct App {
     apple_missed: std::collections::HashMap<String, std::time::Instant>,
     /// Decoders for the motion sleeves on screen.
     canvas_motion: std::collections::HashMap<String, MotionView>,
+    /// Decoders for Apple Music artist profile hero videos.
+    artist_motion: std::collections::HashMap<String, MotionView>,
     /// Apple lookups already in flight.
     apple_waiting: std::collections::HashSet<String>,
     /// Settings › Artist pages: the listener's own signature service, or empty.
@@ -868,6 +870,7 @@ impl App {
             apple_artists: Default::default(),
             apple_covers: Default::default(),
             canvas_covers: Default::default(),
+            artist_motion: Default::default(),
             apple_missed: Default::default(),
             canvas_motion: Default::default(),
             apple_waiting: Default::default(),
@@ -1334,8 +1337,8 @@ impl App {
         self.signature_waiting.clear();
     }
 
-    /// The newest frame of a motion clip, started the first time it's seen. The decoders
-    /// on screen are capped so old pages don't leave threads behind.
+        /// The newest frame of a motion clip, started the first time it's seen.
+    /// The decoders on screen are capped so old pages don't leave threads behind.
     fn motion_sprite(
         &mut self,
         ctx: &egui::Context,
@@ -1344,14 +1347,13 @@ impl App {
         max_width: u32,
         playing: bool,
     ) -> Option<widgets::MotionSprite> {
-        // One decoder per release. The strip and the player ask for different sizes, and
-        // replacing it per caller would restart the clip every frame and never show a
-        // frame: a bigger view takes over only when it needs a wider decode.
         self.stop_motion_views_except(&key);
+
         let stale = self
             .canvas_motion
             .get(&key)
             .map_or(true, |v| v.width < max_width);
+
         if stale {
             if let Some(old) = self.canvas_motion.remove(&key) {
                 old.motion.stop();
@@ -1364,17 +1366,54 @@ impl App {
                 MotionView::new(crate::motion::play(ctx, url, max_width), max_width),
             );
         }
+
         let view = self.canvas_motion.get_mut(&key)?;
         view.motion.set_playing(playing);
         let tex = view.texture(ctx)?;
+
         Some(widgets::MotionSprite {
             id: tex.id(),
             size: tex.size_vec2(),
         })
     }
 
-    /// Stop active decoders when their view goes away so hidden covers do not keep
-    /// downloading or decoding frames in the background.
+    /// Separate decoder for Apple Music artist profile hero videos.
+       /// Separate decoder for Apple Music artist profile hero videos.
+    fn artist_motion_sprite(
+        &mut self,
+        ctx: &egui::Context,
+        key: &str,
+        url: &str,
+        max_width: u32,
+    ) -> Option<widgets::MotionSprite> {
+        let replace = self
+            .artist_motion
+            .get(key)
+            .is_none_or(|view| view.motion.url() != url);
+
+        if replace {
+            for view in self.artist_motion.values() {
+                view.motion.stop();
+            }
+            self.artist_motion.clear();
+
+            self.artist_motion.insert(
+                key.to_owned(),
+                MotionView::new(crate::motion::play(ctx, url, max_width), max_width),
+            );
+        }
+
+        let view = self.artist_motion.get_mut(key)?;
+        view.motion.set_playing(true);
+        let tex = view.texture(ctx)?;
+
+        Some(widgets::MotionSprite {
+            id: tex.id(),
+            size: tex.size_vec2(),
+        })
+    }
+
+    /// Stop active decoders when their view goes away.
     pub(super) fn stop_motion_views(&mut self) {
         for view in self.canvas_motion.values() {
             view.motion.stop();
@@ -1391,6 +1430,8 @@ impl App {
             keep
         });
     }
+        /// Whether pages draw light: only the ytm-rs theme has a light mode, and it follows
+    /// Settings > Appearance > Mode.
 
     fn accent_color(&self) -> Color32 {
         let theme_accent = self.look().accent(self.accent);
@@ -1401,7 +1442,6 @@ impl App {
             _ => theme_accent,
         };
         if theme::light() {
-            // A pale cover colour would barely show on light pages: deepen it.
             let luma = 0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32;
             if luma > 150.0 {
                 return theme::lerp_color(
@@ -1413,15 +1453,10 @@ impl App {
         }
         c
     }
-
-    /// Whether pages draw light: only the ytm-rs theme has a light mode, and it follows
-    /// Settings › Appearance › Mode.
     fn light_pages(&self, ctx: &egui::Context) -> bool {
         self.look().id == crate::preset::DEFAULT_ID && self.appearance.is_light(ctx)
     }
 
-    /// The active theme preset. Synced once per frame (`sync_look`), so this is a plain
-    /// index, not a search.
     fn look(&self) -> &'static crate::preset::Preset {
         crate::preset::active()
     }
@@ -1433,12 +1468,9 @@ impl App {
         }
     }
 
-    /// Height of the bottom player area: the capsule's 56 points plus the margin it
-    /// floats on.
     fn bar_height(&self) -> f32 {
         86.0
     }
-
     fn toast(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
         if msg != "Removed from queue" {

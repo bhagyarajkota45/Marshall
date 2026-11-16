@@ -25,12 +25,14 @@ pub struct Motion {
     pub wide: Option<String>,
 }
 
-/// Apple's own page for an artist: their display name and wordmark.
+/// Apple's own page for an artist: their display name, wordmark and hero video.
 #[derive(Clone, Debug, Default)]
 pub struct Artwork {
     pub name: String,
     /// The custom wordmark Apple lettered for the artist, when they have one.
     pub logo: Option<LogoSrc>,
+    /// Apple's animated artist profile hero video.
+    pub hero_video: Option<String>,
 }
 
 /// The artist's wordmark as Apple's CDN template, `{w}x{h}{c}.{f}` and all.
@@ -546,8 +548,7 @@ async fn album_by_id(http: &reqwest::Client, id: &str) -> Option<Motion> {
         .map(motion_urls)
         .filter(|m| m.square.is_some())
 }
-
-/// Apple's artist page: their display name and the hero motion clips.
+/// Apple's artist page: display name, wordmark and hero motion video.
 pub async fn artist(http: &reqwest::Client, name: &str) -> Option<Artwork> {
     let q = format!("search?term={}&types=artists&limit=10", url_escape(name));
     let v = api(http, &q).await?;
@@ -556,15 +557,36 @@ pub async fn artist(http: &reqwest::Client, name: &str) -> Option<Artwork> {
 
     let url = format!("https://music.apple.com/{STOREFRONT}/artist/-/{id}");
     let (code, html) = get(http, &url, None).await.ok()?;
+
     if code != 200 {
         return Some(Artwork {
             name: page_name,
             ..Default::default()
         });
     }
+
     let shown = page_title(&html).unwrap_or(page_name);
     let logo = artist_logo(&html);
-    Some(Artwork { name: shown, logo })
+
+    let hero_video = [
+        "motionArtistFullscreen16x9",
+        "motionArtistWide16x9",
+        "motionArtistSquare",
+    ]
+    .iter()
+    .find_map(|key| {
+        let anchor = format!("\"{key}\"");
+        url_after_key(&html, &anchor, "video")
+            .or_else(|| url_after_key(&html, &anchor, "url"))
+            .map(|url| url.replace("\\/", "/"))
+            .filter(|url| url.starts_with("https://"))
+    });
+
+    Some(Artwork {
+        name: shown,
+        logo,
+        hero_video,
+    })
 }
 
 /// The search hit that is this artist: an exact name match first, then one whose
